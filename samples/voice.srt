@@ -1,0 +1,159 @@
+1
+00:00:00,000 --> 00:00:03,600
+Bình minh trên đỉnh Fansipan, nóc nhà Đông Dương.
+
+2
+00:00:03,600 --> 00:00:08,000
+Phố cổ Hội An lung linh đèn lồng mỗi đêm rằm.
+
+3
+00:00:08,000 --> 00:00:13,200
+Vịnh Hạ Long với hàng nghìn đảo đá kỳ vĩ giữa biển xanh.
+
+4
+00:00:13,200 --> 00:00:17,600
+Ruộng bậc thang Mù Cang Chải mùa lúa chín vàng rực.
+
+5
+00:00:17,600 --> 00:00:21,600
+Sông Hương trầm mặc bên kinh thành Huế cổ kính.
+
+6
+00:00:21,600 --> 00:00:25,600
+Chợ nổi Cái Răng tấp nập từ tinh mơ sáng.
+
+7
+00:00:25,600 --> 00:00:30,400
+Hồ Gươm với cầu Thê Húc đỏ rực giữa lòng Hà Nội.
+
+8
+00:00:30,400 --> 00:00:34,400
+Đồi cát Mũi Né nhuộm vàng dưới ánh hoàng hôn.
+
+9
+00:00:34,400 --> 00:00:38,800
+Hang Sơn Đoòng, hang động tự nhiên lớn nhất thế giới.
+
+10
+00:00:38,800 --> 00:00:43,200
+Phố đi bộ Nguyễn Huệ rực rỡ ánh đèn về đêm.
+
+11
+00:00:43,200 --> 00:00:47,200
+Đèo Hải Vân uốn lượn nhìn ra biển xanh thẳm.
+
+12
+00:00:47,200 --> 00:00:51,600
+Lăng Bác trang nghiêm giữa quảng trường Ba Đình lịch sử.
+
+13
+00:00:51,600 --> 00:00:56,400
+Núi Bà Đen cao nhất Nam Bộ, linh thiêng và hùng vĩ.
+
+14
+00:00:56,400 --> 00:01:00,800
+Đảo Phú Quốc với biển ngọc bích và cát trắng mịn.
+
+15
+00:01:00,800 --> 00:01:05,600
+Tam Cốc Bích Động, vịnh Hạ Long trên cạn của Ninh Bình.
+
+16
+00:01:05,600 --> 00:01:10,000
+Chùa Một Cột độc đáo giữa lòng thủ đô Hà Nội.
+
+17
+00:01:10,000 --> 00:01:14,400
+Cao nguyên đá Đồng Văn kỳ vĩ tựa miền cổ tích.
+
+18
+00:01:14,400 --> 00:01:18,800
+Cánh đồng hoa cải vàng Mộc Châu rực rỡ mùa đông.
+
+19
+00:01:18,800 --> 00:01:23,600
+Nhà thờ Đức Bà Sài Gòn cổ kính hơn trăm năm tuổi.
+
+20
+00:01:23,600 --> 00:01:27,600
+Đại Nội Huế thâm trầm với dấu ấn triều Nguyễn.
+
+21
+00:01:27,600 --> 00:01:32,000
+Suối Yến chùa Hương rộn ràng mùa lễ hội đầu xuân.
+
+22
+00:01:32,000 --> 00:01:36,000
+Đỉnh Lảo Thẩn nơi mây luồn qua thung lũng nắng.
+
+23
+00:01:36,000 --> 00:01:40,800
+Đồng bằng sông Cửu Long mênh mông phù sa và sông nước.
+
+24
+00:01:40,800 --> 00:01:45,200
+Núi lửa Chư Đăng Ya rực đỏ mùa hoa dã quỳ.
+
+25
+00:01:45,200 --> 00:01:50,000
+Hồ Ba Bể mặt nước phẳng lặng giữa núi rừng Bắc Kạn.
+
+26
+00:01:50,000 --> 00:01:54,400
+Cố đô Hoa Lư ngàn năm văn hiến của đất Việt.
+
+27
+00:01:54,400 --> 00:01:58,800
+Đèo Mã Pí Lèng, vua của bốn đại đèo Tây Bắc.
+
+28
+00:01:58,800 --> 00:02:03,600
+Biển Mỹ Khê, một trong những bãi biển đẹp nhất hành tinh.
+
+29
+00:02:03,600 --> 00:02:07,600
+Thung lũng Mai Châu ngút ngàn hoa và lúa xanh.
+
+30
+00:02:07,600 --> 00:02:12,400
+Vườn quốc gia Cúc Phương xanh thẳm và đa dạng sinh học.
+
+31
+00:02:12,400 --> 00:02:17,200
+Phố cổ Hà Nội với ba mươi sáu phố phường lâu đời.
+
+32
+00:02:17,200 --> 00:02:21,600
+Tháp Chăm Mỹ Sơn lưu dấu xưa của vương quốc Champa.
+
+33
+00:02:21,600 --> 00:02:26,400
+Cầu Vàng Đà Nẵng nâng đỡ bởi đôi bàn tay khổng lồ.
+
+34
+00:02:26,400 --> 00:02:30,400
+Đồi chè Mộc Châu xanh ngút mắt trong sương sớm.
+
+35
+00:02:30,400 --> 00:02:34,800
+Vịnh Lan Hạ, viên ngọc ẩn của quần đảo Cát Bà.
+
+36
+00:02:34,800 --> 00:02:39,200
+Phố lồng đèn Hội An đêm rằm tháng tám lung linh.
+
+37
+00:02:39,200 --> 00:02:44,000
+Cánh đồng tam giác mạch Hà Giang nở rộ giữa cao nguyên.
+
+38
+00:02:44,000 --> 00:02:48,800
+Cảng Tuần Châu rộn ràng đón du khách lên tàu Hạ Long.
+
+39
+00:02:48,800 --> 00:02:53,200
+Hồ Tà Đùng, Vịnh Hạ Long thu nhỏ giữa Tây Nguyên.
+
+40
+00:02:53,200 --> 00:02:57,600
+Tạm biệt Việt Nam, đất nước hình chữ S yêu thương.

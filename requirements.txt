@@ -1,0 +1,10 @@
+moviepy==1.0.3
+streamlit>=1.28
+pysrt>=1.1.2
+Pillow>=10.0
+numpy>=1.24,<2.0
+imageio==2.31.1
+imageio-ffmpeg>=0.4.9
+decorator>=4.0.2,<5.0
+proglog<=1.0.0
+tqdm>=4.11.2
