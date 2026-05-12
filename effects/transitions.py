@@ -8,9 +8,8 @@ canvas_size, trả về clip_b đã modify. Khi đặt overlap `duration` giây 
 clip_a trong CompositeVideoClip sẽ tạo hiệu ứng.
 """
 import random
-
 import numpy as np
-from PIL import Image, ImageFilter
+import cv2
 from moviepy.video.VideoClip import VideoClip
 
 
@@ -135,10 +134,13 @@ def _zoom_in_trans(clip_b, dur, canvas_size):
         fh, fw = frame.shape[:2]
         new_w = max(int(fw * scale), 1)
         new_h = max(int(fh * scale), 1)
-        scaled = Image.fromarray(frame).resize((new_w, new_h), Image.LANCZOS)
+        
+        # Dùng CV2 INTER_LINEAR thay cho PIL (nhanh hơn 10x)
+        scaled = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        
         left = (new_w - fw) // 2
         top = (new_h - fh) // 2
-        return np.array(scaled.crop((left, top, left + fw, top + fh)))
+        return scaled[top:top + fh, left:left + fw]
 
     return clip_b.fl(filter_fn).crossfadein(dur)
 
@@ -154,7 +156,8 @@ def _zoom_out_trans(clip_b, dur, canvas_size):
         fh, fw = frame.shape[:2]
         new_w = max(int(fw * scale), 1)
         new_h = max(int(fh * scale), 1)
-        scaled = np.array(Image.fromarray(frame).resize((new_w, new_h), Image.LANCZOS))
+        
+        scaled = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
         out = np.zeros_like(frame)
         ox = (fw - new_w) // 2
         oy = (fh - new_h) // 2
@@ -164,7 +167,7 @@ def _zoom_out_trans(clip_b, dur, canvas_size):
     return clip_b.fl(filter_fn).crossfadein(dur)
 
 
-# ---------- Zoom blur (existing) ----------
+# ---------- Zoom blur ----------
 def _zoom_blur(clip_b, dur, canvas_size):
     def filter_fn(get_frame, t):
         frame = get_frame(t)
@@ -173,8 +176,10 @@ def _zoom_blur(clip_b, dur, canvas_size):
         radius = (1.0 - t / dur) * 20.0
         if radius < 0.5:
             return frame
-        img = Image.fromarray(frame).filter(ImageFilter.GaussianBlur(radius))
-        return np.array(img)
+        
+        # Dùng CV2 GaussianBlur (nhanh hơn PIL)
+        k_size = int(radius * 2) | 1
+        return cv2.GaussianBlur(frame, (k_size, k_size), 0)
 
     return clip_b.fl(filter_fn).crossfadein(dur)
 

@@ -1,0 +1,30 @@
+{
+    "aspect_label": "16:9 (1920x1080)",
+    "fps": 24,
+    "codec_format": "h264",
+    "engine": "nvidia",
+    "quality_preset": "speed",
+    "parallel": true,
+    "workers": 72,
+    "zoom_mode": "alternate",
+    "zoom_start_pct": 100,
+    "zoom_end_pct": 120,
+    "pan_direction": "none",
+    "transitions": [
+        "fade",
+        "wipe"
+    ],
+    "trans_mode": "mix",
+    "trans_dur": 0.5,
+    "sub_enabled": true,
+    "sub_preset": "TikTok",
+    "sub_sync": "karaoke",
+    "sub_font": "Arial Bold",
+    "sub_font_size": 24,
+    "sub_position": "bottom",
+    "sub_y_offset": 0.8,
+    "sub_color_hex": "#3ca01e",
+    "sub_stroke_hex": "#bf3434",
+    "sub_highlight_hex": "#FFE600",
+    "sub_stroke_w": 2
+}

@@ -313,16 +313,17 @@ def make_subtitle_clips(
     style: SubtitleStyle,
     video_duration: float,
 ) -> list:
-    """Return list of clips, mỗi clip đã `set_start(seg.start)`.
-
-    Skip segments có start >= video_duration; cắt clip_duration nếu end >
-    video_duration.
+    """Return a list containing a single VideoClip that handles all subtitles.
+    
+    Approach: Thay vì trả về hàng trăm clips (làm CompositeVideoClip cực chậm), 
+    ta trả về 1 VideoClip duy nhất quản lý toàn bộ segments.
     """
     builder = _BUILDERS.get(sync_mode)
     if builder is None:
         raise ValueError(f"Unknown sync_mode: {sync_mode!r}. Available: {sorted(_BUILDERS)}")
 
-    out = []
+    # Lọc và chuẩn bị các segment clips trước (không render, chỉ build metadata)
+    valid_segments = []
     for seg in segments:
         if seg.start >= video_duration:
             continue
@@ -333,7 +334,65 @@ def make_subtitle_clips(
         text = (seg.text or "").strip()
         if not text:
             continue
-        clip = builder(text, canvas_size, style, clip_dur)
-        clip = clip.set_start(seg.start)
-        out.append(clip)
-    return out
+        valid_segments.append({
+            "start": seg.start,
+            "end": clip_end,
+            "text": text,
+            "duration": clip_dur
+        })
+
+    if not valid_segments:
+        return []
+
+    # Cache các builders để tránh load font/wrap text lặp lại trong make_frame
+    # Key: text + duration (vì duration ảnh hưởng sync modes như karaoke)
+    _clip_cache = {}
+
+    def get_rgba_at(t):
+        # Tìm segment hiện tại
+        active = None
+        for s in valid_segments:
+            if s["start"] <= t < s["end"]:
+                active = s
+                break
+        
+        if not active:
+            return np.zeros((canvas_size[1], canvas_size[0], 4), dtype=np.uint8)
+
+        # Build hoặc lấy từ cache
+        cache_key = (active["text"], active["duration"])
+        if cache_key not in _clip_cache:
+            # Tạo clip tạm để lấy frame (builder trả về ImageClip hoặc VideoClip)
+            _clip_cache[cache_key] = builder(active["text"], canvas_size, style, active["duration"])
+        
+        clip = _clip_cache[cache_key]
+        rel_t = t - active["start"]
+        
+        # ImageClip.get_frame(t) trả về RGB, ta cần RGBA
+        if hasattr(clip, "img"): # ImageClip
+            # Thêm alpha channel từ mask nếu có
+            rgb = clip.get_frame(rel_t)
+            if clip.mask:
+                mask = (clip.mask.get_frame(rel_t) * 255).astype(np.uint8)
+                return np.dstack([rgb, mask])
+            else:
+                return np.dstack([rgb, np.full(rgb.shape[:2], 255, dtype=np.uint8)])
+        else: # VideoClip
+            rgb = clip.get_frame(rel_t)
+            mask = (clip.mask.get_frame(rel_t) * 255).astype(np.uint8)
+            return np.dstack([rgb, mask])
+
+    # Wrap thành 1 VideoClip duy nhất
+    def color_frame(t):
+        return get_rgba_at(t)[:, :, :3]
+
+    def mask_frame(t):
+        return get_rgba_at(t)[:, :, 3].astype(np.float32) / 255.0
+
+    final_sub_clip = VideoClip(color_frame, duration=video_duration)
+    final_sub_clip.size = canvas_size
+    final_mask = VideoClip(mask_frame, duration=video_duration, ismask=True)
+    final_mask.size = canvas_size
+    final_sub_clip = final_sub_clip.set_mask(final_mask)
+    
+    return [final_sub_clip]

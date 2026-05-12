@@ -28,6 +28,54 @@ def resolve_encoder(codec_format: str, engine: str) -> str:
     return ENCODER_MATRIX.get((codec_format, engine), "libx264")
 
 
+def _ffmpeg_has_encoder(encoder: str) -> bool:
+    """Kiểm tra FFmpeg có hỗ trợ encoder này không (runtime check)."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout
+        return encoder in out
+    except Exception:
+        return False
+
+
+_nvenc_probe_result: bool | None = None
+
+
+def probe_nvenc_works() -> bool:
+    """Thử encode 1 frame bằng h264_nvenc để xác nhận GPU thực sự hoạt động.
+    Kết quả được cache — chỉ probe một lần per process.
+    """
+    global _nvenc_probe_result
+    if _nvenc_probe_result is not None:
+        return _nvenc_probe_result
+
+    import subprocess, tempfile, os
+    # Tạo 1-frame black video bằng h264_nvenc
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+        tmp = f.name
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "color=black:size=128x72:rate=1:duration=1",
+                "-vframes", "1", "-c:v", "h264_nvenc", "-y", tmp,
+            ],
+            capture_output=True, timeout=15,
+        )
+        _nvenc_probe_result = (result.returncode == 0)
+    except Exception:
+        _nvenc_probe_result = False
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    return _nvenc_probe_result
+
+
 @dataclass
 class RenderConfig:
     width: int = 1080

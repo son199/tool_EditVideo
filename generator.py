@@ -12,7 +12,7 @@ import numpy as np
 from moviepy.audio.AudioClip import AudioClip, concatenate_audioclips
 from moviepy.editor import AudioFileClip, CompositeVideoClip, VideoFileClip, concatenate_videoclips
 
-from config import PAN_OPTIONS, ZOOM_MODES, CODEC_FORMATS, QUALITY_PRESETS, RenderConfig, resolve_encoder
+from config import PAN_OPTIONS, ZOOM_MODES, CODEC_FORMATS, QUALITY_PRESETS, RenderConfig, resolve_encoder, probe_nvenc_works
 from effects.subtitle import (
     SUBTITLE_PRESETS,
     SubtitleStyle,
@@ -24,24 +24,12 @@ from effects.transitions import apply_transition, pick
 from effects.zoom import ken_burns
 from utils.image_processor import list_images
 from utils.parse_json import load_scenes
-from utils.parse_srt import Segment, load_srt
+from models import Scene, Segment
+from utils.parse_srt import group_segments_by_script, load_srt
 
 _PAN_DIRECTIONS_NONRANDOM = [p for p in PAN_OPTIONS if p not in ("none", "random")]
 
 
-@dataclass
-class Scene:
-    index: int
-    image_path: Path
-    script: str
-    start: float
-    end: float
-    duration: float
-    zoom_kind: Literal["in", "out"]
-    zoom_amount: Optional[float] = None      # per-scene override; None = dùng global
-    pan: Optional[str] = None                # per-scene override; None = dùng global
-    subtitle_enabled: bool = True             # E7: tắt sub cho scene cụ thể
-    transition_in: Optional[str] = None       # E8: transition trước scene này; None = global mix
 
 
 def _resolve_pan(scene_pan: Optional[str], global_pan: str) -> str:
@@ -76,12 +64,17 @@ def align_scenes(
     segments: list[Segment],
     images: list[Path],
     zoom_mode: str = "alternate",
-) -> list[Scene]:
+) -> tuple[list[Scene], list[Segment]]:
     n = len(scenes_json)
     if len(segments) != n:
-        raise ValueError(
-            f"Mismatch: JSON có {n} scenes nhưng SRT có {len(segments)} dòng"
-        )
+        if len(segments) > n:
+            # SRT có nhiều đoạn hơn scenes (do ngắt nghỉ câu) → gộp lại theo script
+            scripts = [str(s.get("script", "")) for s in scenes_json]
+            segments = group_segments_by_script(segments, scripts)
+        else:
+            raise ValueError(
+                f"Mismatch: JSON có {n} scenes nhưng SRT chỉ có {len(segments)} dòng (quá ít)"
+            )
     if len(images) != n:
         raise ValueError(
             f"Mismatch: JSON có {n} scenes nhưng tìm thấy {len(images)} ảnh"
@@ -117,7 +110,7 @@ def align_scenes(
                 transition_in=trans_in,
             )
         )
-    return scenes
+    return scenes, segments
 
 
 def _scene_zoom_range(scene: Scene, config: RenderConfig) -> tuple[float, float]:
@@ -131,6 +124,7 @@ def _scene_zoom_range(scene: Scene, config: RenderConfig) -> tuple[float, float]
 
 
 def _make_kb_clip(scene: Scene, config: RenderConfig):
+    """Trả về list[np.ndarray] frames từ ken_burns."""
     zs, ze = _scene_zoom_range(scene, config)
     pan = _resolve_pan(scene.pan, config.pan_direction)
     return ken_burns(
@@ -146,21 +140,72 @@ def _make_kb_clip(scene: Scene, config: RenderConfig):
     )
 
 
+def _make_kb_as_moviepy_clip(scene: Scene, config: RenderConfig):
+    """Wrap ken_burns frames thành ImageSequenceClip cho MoviePy pipeline."""
+    from moviepy.editor import ImageSequenceClip
+    frames = _make_kb_clip(scene, config)
+    return ImageSequenceClip(frames, fps=config.fps)
+
+
+def _write_frames_ffmpeg(frames: list, out_path: Path, fps: int, width: int, height: int,
+                          encoder: str, preset: str, extra_params: list) -> None:
+    """Pipe numpy frames trực tiếp vào FFmpeg — nhanh hơn MoviePy write_videofile ~3-5x."""
+    import subprocess
+    n_threads = os.cpu_count() or 4
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-f", "rawvideo", "-vcodec", "rawvideo",
+        "-s", f"{width}x{height}",
+        "-pix_fmt", "rgb24",
+        "-r", str(fps),
+        "-i", "pipe:0",
+        "-an",
+        "-vcodec", encoder,
+        "-preset", preset,
+        "-threads", str(n_threads),
+    ]
+    cmd += extra_params
+    cmd += ["-y", str(out_path)]
+
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        for frame in frames:
+            proc.stdin.write(frame.astype(np.uint8).tobytes())
+        proc.stdin.close()
+        proc.wait()
+    except Exception:
+        proc.kill()
+        proc.wait()
+        raise
+
+
 def _scene_to_temp_mp4(args):
     """Worker cho multiprocessing. Render 1 scene ra MP4 ultrafast tạm."""
     scene, config, temp_dir_str = args
-    clip = _make_kb_clip(scene, config)
     out = Path(temp_dir_str) / f"scene_{scene.index:04d}.mp4"
-    clip.write_videofile(
-        str(out),
-        codec="libx264",
-        audio=False,
-        fps=config.fps,
-        threads=2,
-        preset="ultrafast",
-        ffmpeg_params=["-crf", "18"],   # gần lossless để khỏi mất chất lượng trung gian
-        logger=None,
-        verbose=False,
+    # _make_kb_clip trả về list[np.ndarray] frames (từ ken_burns)
+    frames = _make_kb_clip(scene, config)
+    if not isinstance(frames, list):
+        # fallback nếu vẫn là VideoClip
+        n_frames = max(1, int(round(frames.duration * config.fps)))
+        frames = [frames.get_frame(i / config.fps) for i in range(n_frames)]
+    engine = config.engine
+    if engine == "nvidia" and probe_nvenc_works():
+        encoder = "h264_nvenc"
+        extra_params = ["-rc", "constqp", "-qp", "18", "-b:v", "0"]
+        preset = "p1"
+    elif engine in ("amd", "intel"):
+        encoder = resolve_encoder("h264", engine)
+        extra_params = []
+        preset = "speed"
+    else:
+        encoder = "libx264"
+        extra_params = ["-crf", "18"]
+        preset = "ultrafast"
+
+    _write_frames_ffmpeg(
+        frames, out, config.fps, config.width, config.height,
+        encoder, preset, extra_params,
     )
     return str(out)
 
@@ -228,7 +273,7 @@ def _render_targets_parallel(targets, config, workspace_dir, progress_callback):
 def _pick_transition_for_index(
     i: int, scenes: Optional[list[Scene]], config: RenderConfig
 ) -> str:
-    """Per-scene override > global mix > fallback fade."""
+    """Per-scene > global mix > fallback fade."""
     if scenes and i < len(scenes) and scenes[i].transition_in:
         return scenes[i].transition_in
     if config.transitions:
@@ -275,7 +320,7 @@ def build_video(
         scene_paths = render_scenes(scenes, config, temp_dir, progress_callback=parallel_progress)
         clips = [VideoFileClip(str(scene_paths[s.index])) for s in scenes]
     else:
-        clips = [_make_kb_clip(s, config) for s in scenes]
+        clips = [_make_kb_as_moviepy_clip(s, config) for s in scenes]
     return _compose_clips(clips, config, scenes=scenes)
 
 
@@ -306,8 +351,9 @@ def build_final(
         if getattr(scene, "subtitle_enabled", True)
     ]
     composite = add_subtitle(composite, visible_segments, config)
-    composite = add_audio(composite, voice_path)
-    export(composite, out_path, config, logger=logger)
+    # Note: audio sẽ được add ở FFmpeg concat cuối cùng trong export() nếu bật parallel
+    export(composite, out_path, config, logger=logger, 
+           scenes=scenes, scene_paths=scene_paths, segments=segments, voice_path=voice_path)
     return out_path
 
 
@@ -367,7 +413,6 @@ def add_audio(video, voice_path: Path):
 
 
 # Quality table: cho mỗi encoder, map quality_preset → (preset_name, quality_value)
-# Quality value = CRF (libx*) | CQ (nvenc) | global_quality (qsv) | QP (amf). Số nhỏ = đẹp hơn.
 _QUALITY_TABLE: dict[str, dict[str, tuple[str, int]]] = {
     "libx264":    {"speed": ("veryfast",  26), "balanced": ("medium",   23), "quality": ("slow",    20), "max": ("slower", 18)},
     "libx265":    {"speed": ("veryfast",  28), "balanced": ("medium",   24), "quality": ("slow",    22), "max": ("slower", 20)},
@@ -392,23 +437,135 @@ def _encoder_extra_params(encoder: str, q_value: int) -> list[str]:
     return []
 
 
-def export(clip, out_path: Path, config: RenderConfig, logger=None):
+def export(clip, out_path: Path, config: RenderConfig, logger=None, 
+           scenes=None, scene_paths=None, segments=None, voice_path=None):
+    """Render video ra file. Nếu parallel=True, tự động chia nhỏ render song song."""
+    from render_worker import _single_export
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    encoder = resolve_encoder(config.codec_format, config.engine)
-    quality_map = _QUALITY_TABLE.get(encoder) or _QUALITY_TABLE["libx264"]
-    preset, q_val = quality_map.get(config.quality_preset, quality_map["balanced"])
-    extra = _encoder_extra_params(encoder, q_val)
-
-    clip.write_videofile(
-        str(out_path),
-        codec=encoder,
-        audio_codec="aac",
-        fps=config.fps,
-        threads=os.cpu_count() or 2,
-        preset=preset,
-        ffmpeg_params=extra or None,
-        logger=logger if logger is not None else "bar",
+    
+    should_par = (
+        config.parallel 
+        and scenes and scene_paths and segments 
+        and clip.duration > 20
     )
+    
+    if not should_par:
+        if voice_path:
+            from generator import add_audio
+            clip = add_audio(clip, voice_path)
+        _single_export(clip, out_path, config, logger=logger)
+        return
+
+    import tempfile, shutil, subprocess
+    from render_worker import _render_chunk_worker
+    
+    temp_dir = Path(tempfile.mkdtemp(prefix="par_export_"))
+    try:
+        duration = clip.duration
+        chunk_dur = 5.0 
+        chunks = []
+        t = 0.0
+        while t < duration:
+            end = min(t + chunk_dur, duration)
+            chunks.append((t, end))
+            t = end
+        
+        n_workers = config.parallel_workers if config.parallel_workers > 0 else (os.cpu_count() or 4)
+        # Capped 24 worker để an toàn RAM
+        n_workers = min(n_workers, len(chunks), 24) 
+        
+        args_list = []
+        import time
+        from threading import Thread
+        
+        manager = multiprocessing.Manager()
+        # Dùng Manager.list thay vì Array để tương thích Windows spawn
+        progress_array = manager.list([0] * len(chunks))
+        
+        from dataclasses import asdict
+        scenes_dict = [asdict(s) for s in scenes]
+        segments_dict = [asdict(s) for s in segments]
+        
+        args_list = []
+        for i, (start, end) in enumerate(chunks):
+            tmp = temp_dir / f"chunk_{i:04d}.mp4"
+            args_list.append((i, start, end, scenes_dict, scene_paths, segments_dict, voice_path, config, tmp, progress_array))
+        
+        if logger:
+            logger.info(f"🚀 Parallel Export: {len(chunks)} chunks, {n_workers} workers...")
+            
+        results_map = {}
+        
+        # Thread theo dõi tiến độ thời gian thực từ các worker
+        stop_monitor = False
+        def monitor_progress():
+            while not stop_monitor:
+                current_total = sum(progress_array)
+                total_possible = len(chunks) * 100
+                overall_pct = int(current_total / total_possible * 100)
+                done_count = sum(1 for p in progress_array if p == 100)
+                active_count = sum(1 for p in progress_array if 0 < p < 100)
+                
+                if logger:
+                    msg = f"Đang render video... {overall_pct}% ({done_count}/{len(chunks)} chunks xong, {active_count} active)"
+                    logger.info(msg)
+                time.sleep(1.5) # Update mỗi 1.5s để tránh lag UI
+        
+        try:
+            from streamlit.runtime.scriptrunner import add_script_run_context
+        except ImportError:
+            try:
+                from streamlit.scriptrunner import add_script_run_context
+            except ImportError:
+                # Phiên bản cũ hơn nữa
+                try:
+                    from streamlit.report_thread import add_report_ctx as add_script_run_context
+                except ImportError:
+                    add_script_run_context = lambda thread: None
+
+        monitor_thread = Thread(target=monitor_progress, daemon=True)
+        add_script_run_context(monitor_thread)
+        monitor_thread.start()
+        
+        try:
+            with multiprocessing.Pool(processes=n_workers) as pool:
+                # Vẫn dùng imap_unordered để thu thập kết quả file
+                for i, (c_idx, path) in enumerate(pool.imap_unordered(_render_chunk_worker, args_list)):
+                    results_map[c_idx] = path
+        finally:
+            stop_monitor = True
+            monitor_thread.join(timeout=2)
+            manager.shutdown()
+        
+        # Sắp xếp lại đúng thứ tự
+        results = [results_map[i] for i in range(len(chunks))]
+        
+        list_file = temp_dir / "list.txt"
+        with open(list_file, "w") as f:
+            for r in results:
+                f.write(f"file '{Path(r).name}'\n")
+        
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-f", "concat", "-safe", "0", "-i", str(list_file)
+        ]
+        if voice_path:
+            cmd += ["-i", str(voice_path)]
+            
+        cmd += [
+            "-c:v", "copy", 
+            "-c:a", "aac", "-b:a", "192k",
+            "-map", "0:v:0"
+        ]
+        if voice_path:
+            cmd += ["-map", "1:a:0", "-shortest"]
+        else:
+            cmd += ["-c:a", "copy"]
+            
+        cmd += ["-y", str(out_path)]
+        subprocess.run(cmd, check=True)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def render_to_project(
@@ -418,20 +575,12 @@ def render_to_project(
     prep_callback=None,
     parallel_progress=None,
 ):
-    """Pipeline render vào project workspace persistent (cho Scene Editor).
-
-    Đọc inputs từ project_files dict (do project.init_workspace() trả về),
-    render scenes ra project_files['scenes_dir']/scene_NNNN.mp4, build final
-    ra project_files['final_mp4']. Trả về (scenes, segments, scene_paths).
-
-    Caller (app.py) chịu trách nhiệm save_state() sau khi thành công.
-    """
     if prep_callback:
         prep_callback("parse")
     scenes_json = load_scenes(project_files["scenes_json"])
     segments = load_srt(project_files["voice_srt"])
     images = list_images(project_files["images_dir"], len(scenes_json))
-    scenes = align_scenes(scenes_json, segments, images, zoom_mode=config.zoom_mode)
+    scenes, segments = align_scenes(scenes_json, segments, images, zoom_mode=config.zoom_mode)
 
     if prep_callback:
         use_par = config.parallel and len(scenes) > 1
@@ -472,7 +621,7 @@ def quick_render(
     scenes_json = load_scenes(json_path)
     segments = load_srt(srt_path)
     images = list_images(images_dir, len(scenes_json))
-    scenes = align_scenes(scenes_json, segments, images, zoom_mode=config.zoom_mode)
+    scenes, segments = align_scenes(scenes_json, segments, images, zoom_mode=config.zoom_mode)
 
     use_parallel = config.parallel and len(scenes) > 1
     parallel_temp = Path(tempfile.mkdtemp(prefix="autoedit_par_")) if use_parallel else None
@@ -480,18 +629,18 @@ def quick_render(
     try:
         if prep_callback:
             prep_callback("parallel" if use_parallel else "build")
-        video = build_video(
-            scenes,
-            config,
-            temp_dir=parallel_temp,
-            parallel_progress=parallel_progress,
-        )
-        video = add_subtitle(video, segments, config)
-        video = add_audio(video, Path(voice_path))
-        if prep_callback:
-            prep_callback("encode")
-        out_path = Path(out_path)
-        export(video, out_path, config, logger=logger)
+        
+        if config.parallel and len(scenes) > 1 and parallel_temp:
+            scene_paths = render_scenes(scenes, config, parallel_temp, progress_callback=parallel_progress)
+            clips = [VideoFileClip(str(scene_paths[s.index])) for s in scenes]
+        else:
+            clips = [_make_kb_as_moviepy_clip(s, config) for s in scenes]
+            scene_paths = None
+
+        composite = _compose_clips(clips, config, scenes=scenes)
+        
+        export(composite, out_path, config, logger=logger,
+               scenes=scenes, scene_paths=scene_paths, segments=segments, voice_path=Path(voice_path))
     finally:
         if parallel_temp is not None:
             shutil.rmtree(parallel_temp, ignore_errors=True)
@@ -502,7 +651,7 @@ def _main():
     p = argparse.ArgumentParser(description="Auto Video Editor CLI")
     p.add_argument("--json", required=True)
     p.add_argument("--srt", required=True)
-    p.add_argument("--images", required=True, help="Thư mục chứa 1.png, 2.png, ...")
+    p.add_argument("--images", required=True)
     p.add_argument("--voice", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--width", type=int, default=1080)
@@ -512,54 +661,32 @@ def _main():
     p.add_argument("--zoom-end", type=float, default=1.2)
     p.add_argument("--pan", choices=PAN_OPTIONS, default="none")
     p.add_argument("--fps", type=int, default=30)
-    p.add_argument(
-        "--transitions",
-        default="fade,slide",
-        help="Comma list từ AVAILABLE_TRANSITIONS (empty = no transitions)",
-    )
+    p.add_argument("--transitions", default="fade,slide")
     p.add_argument("--transition-mode", choices=["fixed", "mix"], default="mix")
     p.add_argument("--transition-duration", type=float, default=0.5)
-    p.add_argument("--subtitle", action="store_true", help="Bật subtitle overlay")
-    p.add_argument("--subtitle-preset", default="TikTok",
-                   choices=list(SUBTITLE_PRESETS.keys()))
+    p.add_argument("--subtitle", action="store_true")
+    p.add_argument("--subtitle-preset", default="TikTok", choices=list(SUBTITLE_PRESETS.keys()))
     p.add_argument("--subtitle-sync", default="per_line", choices=SUB_SYNC_MODES)
     p.add_argument("--subtitle-font", default="Arial Bold", choices=SUB_FONT_OPTIONS)
     p.add_argument("--subtitle-size", type=int, default=64)
     p.add_argument("--subtitle-position", default="bottom", choices=["top", "middle", "bottom"])
-    p.add_argument("--codec", default="h264", choices=CODEC_FORMATS,
-                   help="h264 (compatible) | hevc (chất lượng cao)")
-    p.add_argument("--engine", default="cpu", choices=["cpu", "nvidia", "amd", "intel"],
-                   help="cpu = libx264/x265, hoặc GPU brand tương ứng")
-    p.add_argument("--quality", default="balanced", choices=QUALITY_PRESETS,
-                   help="speed | balanced | quality | max")
-    p.add_argument("--parallel", action="store_true",
-                   help="Render scene song song trên nhiều core")
-    p.add_argument("--workers", type=int, default=0,
-                   help="Số worker process (0 = auto theo cpu_count)")
+    p.add_argument("--codec", default="h264", choices=CODEC_FORMATS)
+    p.add_argument("--engine", default="cpu", choices=["cpu", "nvidia", "amd", "intel"])
+    p.add_argument("--quality", default="balanced", choices=QUALITY_PRESETS)
+    p.add_argument("--parallel", action="store_true")
+    p.add_argument("--workers", type=int, default=0)
     args = p.parse_args()
 
     transitions = [t.strip() for t in args.transitions.split(",") if t.strip()]
     cfg = RenderConfig(
-        width=args.width,
-        height=args.height,
-        zoom_mode=args.zoom_mode,
-        zoom_start=args.zoom_start,
-        zoom_end=args.zoom_end,
-        pan_direction=args.pan,
-        fps=args.fps,
-        transitions=transitions,
-        transition_mode=args.transition_mode,
-        transition_duration=args.transition_duration,
-        subtitle_enabled=args.subtitle,
-        subtitle_preset=args.subtitle_preset,
-        subtitle_sync_mode=args.subtitle_sync,
-        subtitle_font=args.subtitle_font,
-        subtitle_font_size=args.subtitle_size,
-        subtitle_position=args.subtitle_position,
-        codec_format=args.codec,
-        engine=args.engine,
-        quality_preset=args.quality,
-        parallel=args.parallel,
+        width=args.width, height=args.height, zoom_mode=args.zoom_mode,
+        zoom_start=args.zoom_start, zoom_end=args.zoom_end, pan_direction=args.pan,
+        fps=args.fps, transitions=transitions, transition_mode=args.transition_mode,
+        transition_duration=args.transition_duration, subtitle_enabled=args.subtitle,
+        subtitle_preset=args.subtitle_preset, subtitle_sync_mode=args.subtitle_sync,
+        subtitle_font=args.subtitle_font, subtitle_font_size=args.subtitle_size,
+        subtitle_position=args.subtitle_position, codec_format=args.codec,
+        engine=args.engine, quality_preset=args.quality, parallel=args.parallel,
         parallel_workers=args.workers,
     )
     out = quick_render(args.json, args.srt, args.images, args.voice, args.out, cfg)

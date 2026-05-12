@@ -15,30 +15,38 @@ Pan semantics ("camera motion direction"):
 """
 from pathlib import Path
 
+import cv2
 import numpy as np
 from PIL import Image
-from moviepy.video.VideoClip import VideoClip
 
 _PAN_MARGIN = 0.20  # 20% extra so cả khi zoom = max van con room pan
 
 
-def _prepare_base(image_path: Path, width: int, height: int, max_zoom: float, has_pan: bool) -> Image.Image:
-    """Pre-scale ảnh để cover canvas với room cho zoom + pan."""
+def _prepare_base_cv2(image_path: Path, width: int, height: int, max_zoom: float, has_pan: bool) -> np.ndarray:
+    """Pre-scale ảnh dùng OpenCV để cover canvas với room cho zoom + pan."""
     pan_factor = (1.0 + _PAN_MARGIN) if has_pan else 1.0
     target_w = int(round(width * max_zoom * pan_factor))
     target_h = int(round(height * max_zoom * pan_factor))
 
-    img = Image.open(str(image_path)).convert("RGB")
-    iw, ih = img.size
+    img = cv2.imread(str(image_path))
+    if img is None:
+        # fallback PIL nếu cv2 không đọc được
+        pil = Image.open(str(image_path)).convert("RGB")
+        img = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+
+    ih, iw = img.shape[:2]
     scale = max(target_w / iw, target_h / ih)
     new_w = max(int(round(iw * scale)), target_w)
     new_h = max(int(round(ih * scale)), target_h)
-    img = img.resize((new_w, new_h), Image.LANCZOS)
+    img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
 
     # Center crop to (target_w, target_h)
     left = (new_w - target_w) // 2
     top = (new_h - target_h) // 2
-    return img.crop((left, top, left + target_w, top + target_h))
+    img = img[top:top + target_h, left:left + target_w]
+
+    # cv2 BGR → RGB
+    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
 _PAN_TABLE = {
@@ -79,14 +87,16 @@ def ken_burns(
 ):
     has_pan = pan not in (None, "", "none")
     max_zoom = max(zoom_start, zoom_end, 1.0)
-    base_pil = _prepare_base(Path(image_path), width, height, max_zoom, has_pan)
-    base_w, base_h = base_pil.size
+    base = _prepare_base_cv2(Path(image_path), width, height, max_zoom, has_pan)
+    base_h, base_w = base.shape[:2]
     cx0 = base_w / 2.0
     cy0 = base_h / 2.0
 
-    def make_frame(t: float) -> np.ndarray:
-        progress = (t / duration) if duration > 0 else 1.0
-        progress = max(0.0, min(1.0, progress))
+    n_frames = max(1, int(round(duration * fps)))
+    frames: list[np.ndarray] = []
+
+    for fi in range(n_frames):
+        progress = fi / (n_frames - 1) if n_frames > 1 else 1.0
         z = _zoom_at(progress, zoom_kind, zoom_start, zoom_end)
 
         sw = min(max(int(round(width * z)), 2), base_w)
@@ -100,9 +110,9 @@ def ken_burns(
         x0 = max(0, min(int(round(cx - sw / 2)), base_w - sw))
         y0 = max(0, min(int(round(cy - sh / 2)), base_h - sh))
 
-        cropped = base_pil.crop((x0, y0, x0 + sw, y0 + sh))
+        cropped = base[y0:y0 + sh, x0:x0 + sw]
         if (sw, sh) != (width, height):
-            cropped = cropped.resize((width, height), Image.LANCZOS)
-        return np.array(cropped)
+            cropped = cv2.resize(cropped, (width, height), interpolation=cv2.INTER_LINEAR)
+        frames.append(cropped)
 
-    return VideoClip(make_frame, duration=duration).set_fps(fps)
+    return frames  # list[np.ndarray], shape (H, W, 3), dtype uint8

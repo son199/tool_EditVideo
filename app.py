@@ -33,8 +33,8 @@ from effects.subtitle import (
 )
 
 
+from models import Scene
 from generator import (
-    Scene,
     build_final,
     quick_render,
     render_scenes,
@@ -54,6 +54,30 @@ from utils.parse_srt import Segment
 
 SCENES_FILENAME = "scenes.json"
 SRT_FILENAME = "voice.srt"
+SETTINGS_FILE = "settings.json"
+
+
+def _save_settings(data: dict):
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+
+
+def _load_settings() -> dict:
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+# Auto load settings vào session_state
+if "settings_loaded" not in st.session_state:
+    saved_cfg = _load_settings()
+    for k, v in saved_cfg.items():
+        st.session_state[k] = v
+    st.session_state["settings_loaded"] = True
 
 st.set_page_config(page_title="Auto Video Editor", layout="wide", page_icon="🎬")
 
@@ -165,6 +189,33 @@ class StreamlitProgressLogger(ProgressBarLogger):
         self._last_update = 0.0
         self._last_pct = -1
         self._current_bar = None
+
+    def info(self, message: str):
+        """Hỗ trợ logging từ generator.py và update UI nếu có %"""
+        print(f"[INFO] {message}")
+        if "%" in message:
+            try:
+                import re
+                match = re.search(r"(\d+)%", message)
+                if match:
+                    val = int(match.group(1))
+                    pct = min(max(val / 100.0, 0.0), 1.0)
+                    self.widget.progress(pct, text=message)
+            except Exception:
+                pass
+        else:
+            # Nếu không có % thì chỉ update label của thanh progress hiện tại
+            try:
+                current_val = max(0, self._last_pct)
+                self.widget.progress(current_val / 100.0, text=message)
+            except Exception:
+                pass
+
+    def warning(self, message: str):
+        print(f"[WARN] {message}")
+
+    def error(self, message: str):
+        print(f"[ERROR] {message}")
 
     def bars_callback(self, bar, attr, value, old_value=None):
         if attr != "index":
@@ -893,20 +944,25 @@ with st.sidebar:
         st.caption(f"Sẽ dùng: `{final_encoder}`")
 
     st.markdown("**Multiprocessing**")
+    cpu_count = os.cpu_count() or 4
     parallel = st.checkbox(
         "Render scene song song (xài nhiều CPU core)",
-        value=False,
+        value=(cpu_count >= 8), # Auto bật nếu CPU mạnh
         key="parallel",
         help=(
-            "Mỗi scene Ken Burns được render song song trên worker process riêng, "
-            "sau đó concat lại. Tăng 4-8× trên máy nhiều core. "
-            "Nên bật trên máy ≥8 core, không cần thiết trên laptop."
+            "Mỗi scene và cả khâu render video cuối sẽ được chia nhỏ xử lý song song. "
+            "Tăng tốc gấp 10-20 lần trên máy nhiều core."
         ),
     )
     if parallel:
-        cpu_count = os.cpu_count() or 4
-        # Default an toàn hơn: cpu_count // 2 hoặc 4, tránh hết page file Windows
-        safe_default = max(2, min(cpu_count // 2, 4))
+        # Tăng safe_default cho máy mạnh (Xeon)
+        if cpu_count >= 32:
+            safe_default = 12
+        elif cpu_count >= 16:
+            safe_default = 6
+        else:
+            safe_default = 4
+            
         workers = st.slider(
             "Số worker", 2, max(cpu_count, 4), safe_default, 1, key="workers",
             help=(
@@ -961,6 +1017,8 @@ with st.sidebar:
     )
     trans_dur = st.slider("Duration (s)", 0.0, 1.5, 0.5, 0.1, key="trans_dur")
 
+    st.divider()
+
     st.markdown("**Subtitle**")
     sub_enabled = st.checkbox("Hiện subtitle (burn vào video)", value=False, key="sub_enabled")
     if sub_enabled:
@@ -1001,6 +1059,25 @@ with st.sidebar:
         sub_position = "bottom"
         sub_y_offset = 0.80
 
+    st.divider()
+    if st.button("💾 Lưu tất cả cấu hình", use_container_width=True):
+        # Danh sách tất cả key bao gồm cả Subtitle
+        keys_to_save = [
+            "aspect_label", "custom_w", "custom_h", "fps", "codec_format", "engine",
+            "quality_preset", "parallel", "workers", "zoom_mode", "zoom_start_pct",
+            "zoom_end_pct", "pan_direction", "transitions", "trans_mode",
+            "trans_dur", "sub_enabled", "sub_preset",
+            "sub_sync", "sub_font", "sub_font_size",
+            "sub_position", "sub_y_offset", "sub_color_hex",
+            "sub_stroke_hex", "sub_highlight_hex", "sub_stroke_w"
+        ]
+        to_save = {}
+        for k in keys_to_save:
+            if k in st.session_state:
+                to_save[k] = st.session_state[k]
+        _save_settings(to_save)
+        st.toast("Đã lưu cấu hình (bao gồm Subtitle)!", icon="✅")
+
 st.subheader("Inputs")
 col1, col2 = st.columns(2)
 with col1:
@@ -1027,11 +1104,23 @@ if any(x is not None for x in (n_scenes, n_srt)) or n_img > 0:
     m3.metric("Ảnh", n_img if n_img else "—")
 
     counts = [c for c in (n_scenes, n_srt, n_img) if c]
-    mismatch = bool(counts) and len(set(counts)) > 1
-    if mismatch:
+    # SRT có thể nhiều hơn scenes (do ngắt câu) — sẽ được tự động gộp khi render
+    srt_too_few = (n_scenes and n_srt and n_srt < n_scenes)
+    img_mismatch = (n_scenes and n_img and n_img != n_scenes)
+    if srt_too_few:
         st.error(
-            f"Số lượng không khớp! JSON={n_scenes}, SRT={n_srt}, Images={n_img}. "
-            "Cả ba phải bằng nhau."
+            f"Số lượng không khớp! SRT ({n_srt}) ít hơn số scenes ({n_scenes}). "
+            "SRT phải có ít nhất bằng số scenes."
+        )
+    elif img_mismatch:
+        st.error(
+            f"Số lượng không khớp! Ảnh ({n_img}) ≠ Scenes ({n_scenes}). "
+            "Số ảnh phải bằng số scenes."
+        )
+    elif n_srt and n_scenes and n_srt > n_scenes:
+        st.info(
+            f"SRT có {n_srt} dòng, JSON có {n_scenes} scenes — "
+            "tool sẽ tự động gộp subtitle khi render. ✓"
         )
 
     if image_files:
@@ -1042,7 +1131,12 @@ if any(x is not None for x in (n_scenes, n_srt)) or n_img > 0:
 st.divider()
 
 ready = all([json_file, srt_file, voice_file, image_files])
-counts_match = n_scenes == n_srt == n_img if (n_scenes and n_srt and n_img) else False
+# SRT được phép nhiều hơn scenes (tự gộp); chỉ cần scenes == images và srt >= scenes
+counts_match = (
+    (n_scenes and n_srt and n_img)
+    and n_img == n_scenes
+    and n_srt >= n_scenes
+) if (n_scenes and n_srt and n_img) else False
 
 if not transitions and trans_dur > 0:
     st.info("Chưa chọn transition nào — video sẽ không có hiệu ứng chuyển cảnh.")
